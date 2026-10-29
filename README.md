@@ -71,7 +71,7 @@ DINGTALK_CLIENT_ID=... DINGTALK_CLIENT_SECRET=... go run ./examples/echo
 | text 消息里平台已剔除 @机器人，留一个前导空格；richText 里 `@机器人名` 是独立文本段 | `PlainText()` 两种都处理 |
 | 群聊里 @机器人时不能附带文件 / 语音 / 视频，单聊可以；图片两边都行（走 richText） | — |
 | 附件下载地址是 `http://` 的 OSS 签名链接，约 1 小时有效 | 拿到 downloadCode 后尽快下载 |
-| 主动发送、取 token 不计入「付费 API 调用量」；Webhook 与 Stream 用量标准版不限额 | — |
+| 标准版组织实测只有 `UploadImage`（旧版 oapi 媒体上传）计入「付费 API 调用量」；主动发送、AI 卡片、附件下载、取 token 都不计（官方免计费清单比实际保守）；Webhook 与 Stream 用量显示不限额 | — |
 | 回调里有文档未写的 `openThreadId`（目前等于 `conversationId`） | 保留在 `Message.OpenThreadID` 与 `Message.Raw` |
 | 引用回复在 `text.isReplyMsg` / `text.repliedMsg`；被引的 richText 段用 `msgType` + `content`（与入站 richText 的 `type` + `text` 不同） | `Message.Quote` 统一成 `Text` + `Media` |
 | 被引消息若是本机器人经主动发送接口发出的，顶层带 `originalProcessQueryKey`（即当时发送接口返回值） | 记下它即可把「引用」精确定位到业务对象 |
