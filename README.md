@@ -5,6 +5,8 @@
 - **Stream 长连接收消息**：不需要公网地址；自带有上限的指数退避重连、保活与僵死连接识别，ctx 取消即返回，回调 panic 不会带崩进程。
 - **发消息**：sessionWebhook 就地回复（群聊可 @ 发送人）+ 主动发送（群聊 / 单聊），webhook 过期自动退回主动发送。
 - **附件下载**：图片、文件、语音、视频（含图文混排里的图），以流的形式返回。
+- **引用回复**：解析被引消息的文字与媒体（被引的图片 / 文件同样可下载）；引用的若是本机器人主动发出的消息，带回当时的 `processQueryKey`，可精确反查。
+- **发图**：`UploadImage` 换 mediaId，`Image(mediaID)` 经主动发送接口发出。
 - **accessToken 管理**：缓存、提前刷新，被服务端提前作废时自动刷新重试。
 - 唯一依赖 `github.com/gorilla/websocket`。
 
@@ -69,6 +71,10 @@ DINGTALK_CLIENT_ID=... DINGTALK_CLIENT_SECRET=... go run ./examples/echo
 | 附件下载地址是 `http://` 的 OSS 签名链接，约 1 小时有效 | 拿到 downloadCode 后尽快下载 |
 | 主动发送、取 token 不计入「付费 API 调用量」；Webhook 与 Stream 用量标准版不限额 | — |
 | 回调里有文档未写的 `openThreadId`（目前等于 `conversationId`） | 保留在 `Message.OpenThreadID` 与 `Message.Raw` |
+| 引用回复在 `text.isReplyMsg` / `text.repliedMsg`；被引的 richText 段用 `msgType` + `content`（与入站 richText 的 `type` + `text` 不同） | `Message.Quote` 统一成 `Text` + `Media` |
+| 被引消息若是本机器人经主动发送接口发出的，顶层带 `originalProcessQueryKey`（即当时发送接口返回值） | 记下它即可把「引用」精确定位到业务对象 |
+| 群里不能 @ 着发文件，但可以**引用一个文件再 @机器人**（正文可为空） | 被引文件的 downloadCode 可直接下载 |
+| sessionWebhook 不支持图片；发图只能走主动发送 | `Reply` 遇到图片直接走主动发送 |
 
 ## 设计约定
 

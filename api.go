@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,7 @@ type APIClient struct {
 	clientSecret string
 	robotCode    string
 	host         string
+	oapiHost     string // 旧版接口（媒体上传）的地址
 	http         *http.Client
 	log          *slog.Logger
 
@@ -38,6 +41,7 @@ type APIConfig struct {
 	// RobotCode 默认等于 ClientID（企业内部应用即如此）。
 	RobotCode   string
 	OpenAPIHost string       // 默认 https://api.dingtalk.com
+	OAPIHost    string       // 旧版接口地址，默认 https://oapi.dingtalk.com（仅媒体上传用）
 	HTTPClient  *http.Client // 默认 30s 超时
 	Logger      *slog.Logger // nil 即静默
 }
@@ -50,6 +54,9 @@ func NewAPIClient(cfg APIConfig) *APIClient {
 	if cfg.OpenAPIHost == "" {
 		cfg.OpenAPIHost = defaultOpenAPIHost
 	}
+	if cfg.OAPIHost == "" {
+		cfg.OAPIHost = "https://oapi.dingtalk.com"
+	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -59,7 +66,7 @@ func NewAPIClient(cfg APIConfig) *APIClient {
 	}
 	return &APIClient{
 		clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, robotCode: cfg.RobotCode,
-		host: cfg.OpenAPIHost, http: cfg.HTTPClient, log: log, tokenSkew: 5 * time.Minute,
+		host: cfg.OpenAPIHost, oapiHost: cfg.OAPIHost, http: cfg.HTTPClient, log: log, tokenSkew: 5 * time.Minute,
 	}
 }
 
@@ -183,12 +190,16 @@ func (a *APIClient) doJSON(ctx context.Context, path, token string, in, out any)
 	return nil
 }
 
-// OutMessage 是要发出去的一条消息。用 Text / Markdown 构造。
+// OutMessage 是要发出去的一条消息。用 Text / Markdown / Image 构造。
 type OutMessage struct {
 	markdown bool
 	title    string
 	text     string
+	mediaID  string // 非空即图片消息
 }
+
+// Image 构造图片消息；mediaID 来自 UploadImage。只能走主动发送接口（sessionWebhook 不支持图片）。
+func Image(mediaID string) OutMessage { return OutMessage{mediaID: mediaID} }
 
 // Text 构造纯文本消息。
 func Text(s string) OutMessage { return OutMessage{text: s} }
@@ -200,6 +211,10 @@ func Markdown(title, text string) OutMessage {
 
 // msgKeyParam 转成主动发送接口的 msgKey + msgParam（msgParam 是 JSON 字符串）。
 func (m OutMessage) msgKeyParam() (string, string) {
+	if m.mediaID != "" {
+		p, _ := json.Marshal(map[string]string{"photoURL": m.mediaID})
+		return "sampleImageMsg", string(p)
+	}
 	if m.markdown {
 		p, _ := json.Marshal(map[string]string{"title": m.title, "text": m.text})
 		return "sampleMarkdown", string(p)
@@ -307,6 +322,9 @@ func (a *APIClient) ReplyWebhook(ctx context.Context, msg *Message, m OutMessage
 	if msg.SessionWebhook == "" {
 		return errors.New("dingbot: 消息未带 sessionWebhook")
 	}
+	if m.mediaID != "" {
+		return errors.New("dingbot: sessionWebhook 不支持图片消息，请用 SendGroup / SendToUsers")
+	}
 	if exp := msg.WebhookExpiresAt(); !exp.IsZero() && time.Now().After(exp.Add(-10*time.Second)) {
 		return ErrWebhookExpired
 	}
@@ -351,7 +369,7 @@ func (a *APIClient) ReplyWebhook(ctx context.Context, msg *Message, m OutMessage
 // Reply 回复一条消息：sessionWebhook 有效就走它（群聊可 @ 发送人），过期了就退回主动发送接口
 // （群聊发群、单聊发给发送人；此时无法 @）。
 func (a *APIClient) Reply(ctx context.Context, msg *Message, m OutMessage, atSender bool) error {
-	if msg.SessionWebhook != "" {
+	if msg.SessionWebhook != "" && m.mediaID == "" {
 		err := a.ReplyWebhook(ctx, msg, m, atSender)
 		if !errors.Is(err, ErrWebhookExpired) {
 			return err // 成功，或过期以外的失败（不换路重发，免得对方收到两条）
@@ -367,4 +385,55 @@ func (a *APIClient) Reply(ctx context.Context, msg *Message, m OutMessage, atSen
 	}
 	_, err = a.SendToUsers(ctx, []string{msg.SenderStaffID}, m)
 	return err
+}
+
+// UploadImage 上传一张图片（≤20MB，jpg/png/gif/bmp），返回发图片消息要用的 mediaId。
+//
+// 钉钉的新版 OpenAPI 没有机器人可用的媒体上传，只能走旧版 oapi 的 /media/upload；
+// 新版 accessToken 在旧版接口上同样有效（以 query 参数传入）。
+func (a *APIClient) UploadImage(ctx context.Context, name string, data []byte) (string, error) {
+	for attempt := 0; ; attempt++ {
+		tok, err := a.accessToken(ctx, attempt > 0)
+		if err != nil {
+			return "", err
+		}
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		fw, err := w.CreateFormFile("media", name)
+		if err != nil {
+			return "", err
+		}
+		if _, err := fw.Write(data); err != nil {
+			return "", err
+		}
+		if err := w.Close(); err != nil {
+			return "", err
+		}
+		u := a.oapiHost + "/media/upload?type=image&access_token=" + url.QueryEscape(tok)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, &buf)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", w.FormDataContentType())
+		resp, err := a.http.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("dingbot: 上传图片: %w", err)
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		var r struct {
+			ErrCode int    `json:"errcode"`
+			ErrMsg  string `json:"errmsg"`
+			MediaID string `json:"media_id"`
+		}
+		_ = json.Unmarshal(raw, &r)
+		// 旧版接口 token 失效是 errcode 40014 / 42001 / 88，刷新后重试一次。
+		if attempt == 0 && (r.ErrCode == 40014 || r.ErrCode == 42001 || r.ErrCode == 88) {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK || r.ErrCode != 0 || r.MediaID == "" {
+			return "", fmt.Errorf("dingbot: 上传图片失败（HTTP %d）: %s", resp.StatusCode, truncate(raw, 200))
+		}
+		return r.MediaID, nil
+	}
 }

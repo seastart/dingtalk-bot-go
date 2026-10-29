@@ -92,3 +92,43 @@ func TestIsLoneMention(t *testing.T) {
 		}
 	}
 }
+
+// 引用回复的三种被引形态（真机帧，ID 已替换）。
+const frameQuoteBotText = `{"conversationId":"cidFAKEgroup==","conversationType":"2","isInAtList":true,"senderStaffId":"manager7675","msgId":"msgFAKE2==","originalMsgId":"msgFAKEorig==","originalProcessQueryKey":"pqkFAKE=","msgtype":"text","text":{"isReplyMsg":true,"repliedMsg":{"createdAt":1793262900444,"senderId":"$:LWCP_v1:$FAKEbot","msgType":"text","msgId":"msgFAKEorig==","content":{"text":"#12 已完成"}},"content":" 好"}}`
+
+const frameQuoteRichText = `{"conversationType":"1","senderStaffId":"manager7675","msgtype":"text","text":{"isReplyMsg":true,"repliedMsg":{"msgType":"richText","msgId":"msgFAKErt==","content":{"richText":[{"msgType":"picture","downloadCode":"dcQuotedPic"},{"msgType":"text","content":"这是带图的"}]}},"content":"好"}}`
+
+const frameQuoteFileOnly = `{"conversationType":"2","isInAtList":true,"senderStaffId":"manager7675","msgtype":"text","text":{"isReplyMsg":true,"repliedMsg":{"msgType":"file","msgId":"msgFAKEfile==","content":{"spaceId":"1","fileName":"部署文档.docx","downloadCode":"dcQuotedFile","fileId":"2"}},"content":" "}}`
+
+func TestParseQuote(t *testing.T) {
+	m, err := ParseMessage([]byte(frameQuoteBotText))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Quote == nil || m.Quote.Text != "#12 已完成" || m.Quote.MsgID != "msgFAKEorig==" {
+		t.Fatalf("引用机器人文字: %+v", m.Quote)
+	}
+	if m.OriginalProcessQueryKey != "pqkFAKE=" || m.PlainText() != "好" {
+		t.Fatalf("顶层字段: pqk=%q text=%q", m.OriginalProcessQueryKey, m.PlainText())
+	}
+
+	m, err = ParseMessage([]byte(frameQuoteRichText))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := m.Quote
+	if q == nil || q.Text != "这是带图的" || len(q.Media) != 1 || q.Media[0].DownloadCode != "dcQuotedPic" || q.Media[0].Kind != MsgTypePicture {
+		t.Fatalf("被引 richText（msgType/content 形态）: %+v", q)
+	}
+	if len(m.Attachments()) != 0 {
+		t.Fatal("被引的媒体不应混进本条消息的 Attachments")
+	}
+
+	m, err = ParseMessage([]byte(frameQuoteFileOnly))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.PlainText() != "" || m.Quote == nil || len(m.Quote.Media) != 1 || m.Quote.Media[0].FileName != "部署文档.docx" {
+		t.Fatalf("只引用文件、不写字: text=%q quote=%+v", m.PlainText(), m.Quote)
+	}
+}

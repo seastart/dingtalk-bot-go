@@ -51,6 +51,13 @@ type Message struct {
 	ChatbotUserID string `json:"chatbotUserId"`
 	RobotCode     string `json:"robotCode"` // 企业内部应用里等于 ClientID
 
+	// OriginalMsgID 引用回复时被引消息的 msgId（同 Quote.MsgID，平台在顶层也给一份）。
+	OriginalMsgID string `json:"originalMsgId"`
+	// OriginalProcessQueryKey 被引消息若是【本机器人经主动发送接口发出的】，这里就是当时
+	// 接口返回的 processQueryKey——调用方记下「processQueryKey ↔ 业务对象」即可精确反查，
+	// 不必做文本匹配。引用人发的消息、或机器人经 sessionWebhook 回复的消息时为空。
+	OriginalProcessQueryKey string `json:"originalProcessQueryKey"`
+
 	IsInAtList bool     `json:"isInAtList"`
 	AtUsers    []AtUser `json:"atUsers"`
 
@@ -68,6 +75,8 @@ type Message struct {
 	File     *MediaContent  `json:"-"`
 	Audio    *MediaContent  `json:"-"`
 	Video    *MediaContent  `json:"-"`
+	// Quote 被引用的消息（引用回复时非空；只出现在 text 消息里）。
+	Quote *Quote `json:"-"`
 
 	Raw json.RawMessage `json:"-"`
 }
@@ -109,8 +118,12 @@ func ParseMessage(data []byte) (*Message, error) {
 
 	// 正文的位置随 msgtype 变：text 在 text.content，其余在 content（对象）。
 	var body struct {
-		Text    struct{ Content string } `json:"text"`
-		Content json.RawMessage          `json:"content"`
+		Text struct {
+			Content    string          `json:"content"`
+			IsReplyMsg bool            `json:"isReplyMsg"`
+			RepliedMsg json.RawMessage `json:"repliedMsg"`
+		} `json:"text"`
+		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(data, &body); err != nil {
 		return nil, fmt.Errorf("dingbot: 解析消息正文: %w", err)
@@ -118,6 +131,13 @@ func ParseMessage(data []byte) (*Message, error) {
 	switch m.MsgType {
 	case MsgTypeText:
 		m.Text = body.Text.Content
+		if body.Text.IsReplyMsg && len(body.Text.RepliedMsg) > 0 {
+			q, err := parseQuote(body.Text.RepliedMsg)
+			if err != nil {
+				return nil, err
+			}
+			m.Quote = q
+		}
 	case MsgTypeRichText:
 		var rt struct {
 			RichText []RichTextItem `json:"richText"`
@@ -219,4 +239,75 @@ func (m *Message) Attachments() []Attachment {
 		}
 	}
 	return out
+}
+
+// Quote 是被引用的那条消息（text.repliedMsg）。
+//
+// ★ 它的 richText 形态与入站 richText【不同】（真机 2026-10）：段类型键是 msgType 而不是 type，
+// 文本在 content 而不是 text。照搬入站解析会把被引的图文混排整段丢掉。
+type Quote struct {
+	MsgID     string `json:"msgId"`
+	MsgType   string `json:"msgType"`
+	SenderID  string `json:"senderId"`  // 加密 ID，只能判「是不是同一个人」，不是 userId
+	CreatedAt int64  `json:"createdAt"` // 毫秒时间戳
+
+	Text  string       // 被引消息的文字（text / richText 的文本段 / 语音识别 / markdown 正文）
+	Media []Attachment // 被引消息里可下载的媒体（downloadCode 实测可直接下载）
+	Raw   json.RawMessage
+}
+
+func parseQuote(raw json.RawMessage) (*Quote, error) {
+	var q Quote
+	if err := json.Unmarshal(raw, &q); err != nil {
+		return nil, fmt.Errorf("dingbot: 解析被引消息: %w", err)
+	}
+	q.Raw = append(json.RawMessage(nil), raw...)
+	var c struct {
+		Text     string `json:"text"`
+		Content  string `json:"content"`
+		Title    string `json:"title"`
+		RichText []struct {
+			MsgType      string `json:"msgType"`
+			Content      string `json:"content"`
+			Text         string `json:"text"`
+			DownloadCode string `json:"downloadCode"`
+		} `json:"richText"`
+		MediaContent
+	}
+	var wrap struct {
+		Content json.RawMessage `json:"content"`
+	}
+	_ = json.Unmarshal(raw, &wrap)
+	if len(wrap.Content) > 0 && wrap.Content[0] == '{' {
+		if err := json.Unmarshal(wrap.Content, &c); err != nil {
+			return nil, fmt.Errorf("dingbot: 解析被引消息正文: %w", err)
+		}
+	}
+	switch q.MsgType {
+	case MsgTypeRichText:
+		var parts []string
+		for _, it := range c.RichText {
+			switch {
+			case it.DownloadCode != "":
+				q.Media = append(q.Media, Attachment{Kind: MsgTypePicture, DownloadCode: it.DownloadCode})
+			case it.Content != "" || it.Text != "":
+				parts = append(parts, it.Content+it.Text)
+			}
+		}
+		q.Text = strings.TrimSpace(strings.Join(parts, ""))
+	case MsgTypePicture, MsgTypeFile, MsgTypeVideo:
+		if c.DownloadCode != "" {
+			q.Media = append(q.Media, Attachment{Kind: q.MsgType, DownloadCode: c.DownloadCode, FileName: c.FileName})
+		}
+	case MsgTypeAudio:
+		q.Text = strings.TrimSpace(c.Recognition)
+	default: // text、机器人发的 markdown 等：取得到什么文字就用什么
+		for _, t := range []string{c.Text, c.Content, c.Title} {
+			if strings.TrimSpace(t) != "" {
+				q.Text = strings.TrimSpace(t)
+				break
+			}
+		}
+	}
+	return &q, nil
 }
