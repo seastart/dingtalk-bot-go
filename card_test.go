@@ -85,9 +85,10 @@ func TestAICardLifecycle(t *testing.T) {
 	if err := card.Update(ctx, "x", true); err == nil {
 		t.Fatal("收口后不应再能更新")
 	}
+	// 建卡：创建 → 投放 → 切输入中 → 流式推占位文字；收口：流式 finalize → 写完成态。
 	want := []string{
 		"POST /v1.0/card/instances", "POST /v1.0/card/instances/deliver", "PUT /v1.0/card/instances",
-		"PUT /v1.0/card/streaming", "PUT /v1.0/card/instances",
+		"PUT /v1.0/card/streaming", "PUT /v1.0/card/streaming", "PUT /v1.0/card/instances",
 	}
 	if len(f.calls) != len(want) {
 		t.Fatalf("调用序列: %+v", f.calls)
@@ -103,10 +104,13 @@ func TestAICardLifecycle(t *testing.T) {
 	if f.calls[1].body["openSpaceId"] != "dtv1.card//IM_GROUP.cidG==" {
 		t.Fatalf("群投放 openSpaceId: %v", f.calls[1].body["openSpaceId"])
 	}
-	if flowOf(f.calls[2]) != cardFlowInputing || flowOf(f.calls[4]) != cardFlowFinished {
-		t.Fatalf("状态流转应是 输入中 → 完成: %s → %s", flowOf(f.calls[2]), flowOf(f.calls[4]))
+	if flowOf(f.calls[2]) != cardFlowInputing || flowOf(f.calls[5]) != cardFlowFinished {
+		t.Fatalf("状态流转应是 输入中 → 完成: %s → %s", flowOf(f.calls[2]), flowOf(f.calls[5]))
 	}
-	if f.calls[3].body["isFinalize"] != true {
+	if f.calls[3].body["isFinalize"] != false || f.calls[3].body["content"] != "请稍等…" {
+		t.Fatalf("占位文字须经流式接口推、且不收口: %v", f.calls[3].body)
+	}
+	if f.calls[4].body["isFinalize"] != true {
 		t.Fatal("收口时流式接口须 isFinalize")
 	}
 }

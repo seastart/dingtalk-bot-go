@@ -85,6 +85,12 @@ func (a *APIClient) CreateAICard(ctx context.Context, target CardTarget, content
 	}
 
 	c := &AICard{api: a, outTrackID: id}
+	// 先切到「输入中」（模板此时自带一个跳动的「…」），再用流式接口推占位文字。
+	if err := c.retryQPS(ctx, func() error {
+		return a.callMethod(ctx, http.MethodPut, "/v1.0/card/instances", c.instanceBody(cardFlowInputing, "", false), nil)
+	}); err != nil {
+		return nil, fmt.Errorf("dingbot: AI 卡片切到输入中: %w", err)
+	}
 	if err := c.Update(ctx, content, false); err != nil {
 		return nil, err
 	}
@@ -92,6 +98,10 @@ func (a *APIClient) CreateAICard(ctx context.Context, target CardTarget, content
 }
 
 // Update 覆盖卡片内容（markdown）。finished=true 收口：卡片从「输入中」切到「完成」，此后不应再调。
+//
+// ★ 输入中阶段的文字只能走流式接口（PUT /v1.0/card/streaming, isFinalize=false）——只改卡片数据的话，
+// 模板在「输入中」状态下只显示自带的「…」，我们写进 msgContent 的字根本不出来（真机 2026-10-29）。
+// 模板会在流式文字后面自动接一个跳动的「…」，故调用方不必、也不该自己做省略号动画。
 //
 // 调用方负责节流中间帧：钉钉卡片接口整体约 40 QPS 且对单卡片高频更新会限流（403 QpsLimit）。
 // 限流时本方法退避后重试一次——收口帧失败会让卡片永远停在「输入中」，比晚两秒难受得多。
@@ -101,17 +111,30 @@ func (c *AICard) Update(ctx context.Context, content string, finished bool) erro
 	if c.finished {
 		return errors.New("dingbot: AI 卡片已收口")
 	}
-	flow := cardFlowInputing
-	if finished {
-		// 先用流式接口把「输入中」生命周期正式关掉，再写终态；只写终态在部分客户端上会留下转圈。
-		_ = c.retryQPS(ctx, func() error {
-			return c.api.callMethod(ctx, http.MethodPut, "/v1.0/card/streaming", map[string]any{
-				"outTrackId": c.outTrackID, "guid": c.outTrackID + "-" + fmt.Sprint(time.Now().UnixNano()),
-				"key": "msgContent", "content": content, "isFull": true, "isFinalize": true, "isError": false,
-			}, nil)
-		})
-		flow = cardFlowFinished
+	err := c.retryQPS(ctx, func() error {
+		return c.api.callMethod(ctx, http.MethodPut, "/v1.0/card/streaming", map[string]any{
+			"outTrackId": c.outTrackID, "guid": c.outTrackID + "-" + fmt.Sprint(time.Now().UnixNano()),
+			"key": "msgContent", "content": content, "isFull": true, "isFinalize": finished, "isError": false,
+		}, nil)
+	})
+	if !finished {
+		if err != nil {
+			return fmt.Errorf("dingbot: 流式更新 AI 卡片: %w", err)
+		}
+		return nil
 	}
+	// 收口：流式那一步失败也照样写完成态——宁可内容晚一点，也不能让卡片永远转圈。
+	if err := c.retryQPS(ctx, func() error {
+		return c.api.callMethod(ctx, http.MethodPut, "/v1.0/card/instances", c.instanceBody(cardFlowFinished, content, true), nil)
+	}); err != nil {
+		return fmt.Errorf("dingbot: AI 卡片收口: %w", err)
+	}
+	c.finished = true
+	return nil
+}
+
+// instanceBody 构造「改卡片数据」的请求体。
+func (c *AICard) instanceBody(flow, content string, byKey bool) map[string]any {
 	body := map[string]any{
 		"outTrackId": c.outTrackID,
 		"cardData": map[string]any{"cardParamMap": map[string]string{
@@ -122,18 +145,10 @@ func (c *AICard) Update(ctx context.Context, content string, finished bool) erro
 			"config":            `{"autoLayout":true}`,
 		}},
 	}
-	if finished {
+	if byKey {
 		body["cardUpdateOptions"] = map[string]any{"updateCardDataByKey": true}
 	}
-	if err := c.retryQPS(ctx, func() error {
-		return c.api.callMethod(ctx, http.MethodPut, "/v1.0/card/instances", body, nil)
-	}); err != nil {
-		return fmt.Errorf("dingbot: 更新 AI 卡片: %w", err)
-	}
-	if finished {
-		c.finished = true
-	}
-	return nil
+	return body
 }
 
 // cardQPSBackoff 遇到 QpsLimit 后重试前的停顿。变量而非常量：测试要把它调小。
