@@ -40,3 +40,25 @@ func TestRealSendImage(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// DINGTALK_REAL=1 go test -run TestRealAICard -v
+func TestRealAICard(t *testing.T) {
+	if os.Getenv("DINGTALK_REAL") == "" {
+		t.Skip("未设 DINGTALK_REAL，跳过真机用例")
+	}
+	a := NewAPIClient(APIConfig{ClientID: os.Getenv("DINGTALK_CLIENT_ID"), ClientSecret: os.Getenv("DINGTALK_CLIENT_SECRET")})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	card, err := a.CreateAICard(ctx, CardTarget{UserID: os.Getenv("DINGTALK_TEST_USER")}, "🌿 dingbot 卡片测试：请稍等…")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second)
+	if err := card.Update(ctx, "🌿 dingbot 卡片测试：还在处理…", false); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second)
+	if err := card.Update(ctx, "**dingbot 卡片测试完成**\n- 原地更新\n- 已收口", true); err != nil {
+		t.Fatal(err)
+	}
+}

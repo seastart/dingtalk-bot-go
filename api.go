@@ -25,6 +25,7 @@ type APIClient struct {
 	robotCode    string
 	host         string
 	oapiHost     string // 旧版接口（媒体上传）的地址
+	cardTemplate string // AI 卡片模板 ID
 	http         *http.Client
 	log          *slog.Logger
 
@@ -44,6 +45,8 @@ type APIConfig struct {
 	OAPIHost    string       // 旧版接口地址，默认 https://oapi.dingtalk.com（仅媒体上传用）
 	HTTPClient  *http.Client // 默认 30s 超时
 	Logger      *slog.Logger // nil 即静默
+	// AICardTemplateID 默认 DefaultAICardTemplateID（官方公共 AI 卡片模板），一般不用改。
+	AICardTemplateID string
 }
 
 // NewAPIClient 创建 OpenAPI 客户端。
@@ -53,6 +56,9 @@ func NewAPIClient(cfg APIConfig) *APIClient {
 	}
 	if cfg.OpenAPIHost == "" {
 		cfg.OpenAPIHost = defaultOpenAPIHost
+	}
+	if cfg.AICardTemplateID == "" {
+		cfg.AICardTemplateID = DefaultAICardTemplateID
 	}
 	if cfg.OAPIHost == "" {
 		cfg.OAPIHost = "https://oapi.dingtalk.com"
@@ -66,7 +72,7 @@ func NewAPIClient(cfg APIConfig) *APIClient {
 	}
 	return &APIClient{
 		clientID: cfg.ClientID, clientSecret: cfg.ClientSecret, robotCode: cfg.RobotCode,
-		host: cfg.OpenAPIHost, oapiHost: cfg.OAPIHost, http: cfg.HTTPClient, log: log, tokenSkew: 5 * time.Minute,
+		host: cfg.OpenAPIHost, oapiHost: cfg.OAPIHost, cardTemplate: cfg.AICardTemplateID, http: cfg.HTTPClient, log: log, tokenSkew: 5 * time.Minute,
 	}
 }
 
@@ -140,29 +146,21 @@ func (a *APIClient) accessToken(ctx context.Context, force bool) (string, error)
 	return a.token, nil
 }
 
-// call 带 token 调一个 OpenAPI；遇 token 失效刷新后重试一次。
+// call 带 token 以 POST 调一个 OpenAPI；遇 token 失效刷新后重试一次。
 func (a *APIClient) call(ctx context.Context, path string, in, out any) error {
-	for attempt := 0; ; attempt++ {
-		tok, err := a.accessToken(ctx, attempt > 0)
-		if err != nil {
-			return err
-		}
-		err = a.doJSON(ctx, path, tok, in, out)
-		var ae *APIError
-		if attempt == 0 && errors.As(err, &ae) && ae.authInvalid() {
-			a.log.Info("dingtalk accessToken 失效，刷新后重试", "path", path, "code", ae.Code)
-			continue
-		}
-		return err
-	}
+	return a.callMethod(ctx, http.MethodPost, path, in, out)
 }
 
 func (a *APIClient) doJSON(ctx context.Context, path, token string, in, out any) error {
+	return a.doJSONMethod(ctx, http.MethodPost, path, token, in, out)
+}
+
+func (a *APIClient) doJSONMethod(ctx context.Context, method, path, token string, in, out any) error {
 	body, err := json.Marshal(in)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.host+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, a.host+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
