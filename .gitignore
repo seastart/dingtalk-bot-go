@@ -1,0 +1,4 @@
+# 本地联调凭据与产物
+*.env
+/examples/**/frames.jsonl
+/examples/echo/echo
