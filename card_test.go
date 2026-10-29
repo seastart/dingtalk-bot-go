@@ -23,6 +23,7 @@ type fakeCardAPI struct {
 	calls   []cardCall
 	qpsOnce atomic.Bool
 	deny    bool
+	denied  int // 被拒的请求次数
 }
 
 func newFakeCardAPI(t *testing.T) *fakeCardAPI {
@@ -33,6 +34,9 @@ func newFakeCardAPI(t *testing.T) *fakeCardAPI {
 			return
 		}
 		if f.deny {
+			f.mu.Lock()
+			f.denied++
+			f.mu.Unlock()
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"code":"Forbidden.AccessDenied.AccessTokenPermissionDenied","message":"应用尚未开通所需的权限：[Card.Instance.Write]"}`))
 			return
@@ -133,6 +137,12 @@ func TestAICardPermissionDenied(t *testing.T) {
 	_, err := f.client().CreateAICard(context.Background(), CardTarget{UserID: "manager7675"}, "…")
 	if !IsPermissionDenied(err) {
 		t.Fatalf("应识别为缺权限: %v", err)
+	}
+	f.mu.Lock()
+	n := f.denied
+	f.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("缺权限不应被当成 token 失效去重试: %d", n)
 	}
 	if _, err := f.client().CreateAICard(context.Background(), CardTarget{}, "…"); err == nil {
 		t.Fatal("没给投放位置应报错")

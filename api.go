@@ -96,8 +96,9 @@ func (e *APIError) Error() string {
 // 第一性原理：token 可能在有效期内被服务端作废（应用密钥被重置、并发多处取 token 等），
 // 只信本地记的过期时间就会拿着死 token 一直失败、直到进程重启（飞书真机踩过）。
 func (e *APIError) authInvalid() bool {
-	return e.HTTPStatus == http.StatusUnauthorized || strings.Contains(e.Code, "InvalidAuthentication") ||
-		strings.Contains(strings.ToLower(e.Code), "token")
+	// ★ 不能按子串 "token" 判：缺权限的错误码是 Forbidden.AccessDenied.AccessTokenPermissionDenied，
+	// 也含 token——那样会把「缺权限」当成 token 失效，每次都白刷一次 token 再重发一遍。
+	return e.HTTPStatus == http.StatusUnauthorized || strings.Contains(e.Code, "InvalidAuthentication")
 }
 
 func newAPIError(resp *http.Response, raw []byte) error {
